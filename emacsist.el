@@ -48,16 +48,22 @@
   (emacsist-append-articles-list)
   (message "生成文章列表成功!"))
 
+(defun emacsist-org-link-encode (origin)
+  "Org link special-characters encode for github."
+  (s-replace "?" "%3F" origin))
+
 (defun emacsist-articles-list-content ()
   (let* ((apath (expand-file-name "articles" emacsist-repo-root)))
     (mapcar
      #'(lambda (item)
          (format "+ [[./articles/%s][%s]]  "
-                 (f-filename item)
+                 (emacsist-org-link-encode (f-filename item))
                  (f-base item)))
-     (f-files apath
-              (lambda (file) (or (f-ext? file "org")
-                                 (f-ext? file "md")))))))
+     (sort                   ;; 按时间最新到最旧
+      (f-files apath
+               (lambda (file) (or (f-ext? file "org")
+                                  (f-ext? file "md"))))
+      'string>))))
 
 (defun emacsist-append-articles-list ()
   "Find the correct position"
@@ -91,7 +97,9 @@
           (f-move fname des-name)
           (kill-buffer)
           (find-file des-name)
-          (message "原稿件:%s, 已经发布到:%s" fname des-name))
+          (magit-stage-file (buffer-file-name))   ;; stage current file
+          (message "原稿件:%s, 已经发布到:%s" fname des-name)
+          (emacsist))      ;; 生成目录
       (message "当前文件 %s 不在目录tougao/下，不能发布！" fname))))
 
 (provide 'emacsist)

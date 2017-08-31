@@ -1,0 +1,133 @@
+#+TITLE: Emacs 26的多线程探索
+#+AUTHOR: aborn
+#+DATE: 2017-02-05
+#+EMAIL: aborn.jiang@gmail.com
+#+LANGUAGE: zh
+#+LATEX_HEADER: \usepackage{xeCJK}
+#+LATEX_HEADER: \setCJKmainfont{Microsoft YaHei}
+#+OPTIONS: toc:nil
+
+#+SETUPFILE: ~/github/org-html-themes/setup/theme-readtheorg.setup
+
+-----
+
+* 前言
+  春节刚过，小编在这里给大家拜年了，祝大家在新的一年里学习进步，事业有成！在刚刚过去的
+  2016年里，Emacs 25版本发布了。按照每年发布一个大版本的惯例，2017年，期待
+  Emacs 26版本早点发布。那么，你最期待的Emacs 26有哪些特性呢？不瞒你说，小编最期待
+  的特性是多线程。年初的时候，多线程的特性已经合入到Master分支。不过，之前多线程在Mac
+  下有一个致命的问题：一旦调用 *make-thread* 函数就会导致CPU飙升至100%，Emacs卡死。
+  春节过后，小编又试了下最新的Emacs 26的包，发现，那个致命的BUG得到了修复，在Mac下
+  能正常跑多线程代码。那么，今天我们简单聊聊Emacs 26的多线程。
+
+* 多线程与异步
+  在Emacs没提供多线程的特性的时候，如果开发者想使用异步的包，那可以采用async
+  (链接为:https://github.com/jwiegley/emacs-async)。这个异步包采用的是创建一个
+  独立的子进程进行后台操作。这种异步方式最大的缺点是新的子进程远程与Emacs主进程不共享
+  上下文（如不共享变量）,它完全是独立的。相反，多线程的方式有一个优点就是，多个线程间
+  共享同一个上下文，可修改同一个变量。但有的人认为创建子进程这种异步才是"正常"的异步
+  方式。因为，如果采用多线程的方式，考虑到会产生多个线程同时修改同个变量(或者Buffer)
+  可能导致Emacs诡异行为。
+
+* 安装Emacs 26开发版
+  要想在Emacs 26发布之前使用多线程的功能，必需升级Emacs到最新的开发版本。Mac环境下，
+  下载Daily Build的开发版本，地址为：https://emacsformacosx.com/builds 。我
+  下载的是2017-02-05这天的Daily Build开发版 (版本号:26.0.50.1)。
+
+  如果是Linux环境，可以自己下载源代码进行源码编译安装。
+  (源码下载: git clone --depth 1 git://git.sv.gnu.org/emacs.git)
+
+* 尝鲜Emacs多线程
+  安装好最新版本的Emacs后，下面我们尝试下多线程。创建新的线程的函数是
+  *make-thread* ，这个函数的定义如下：
+
+  #+BEGIN_SRC emacs-lisp
+  (make-thread FUNCTION &optional NAME)
+  #+END_SRC
+
+  它的作用是创建一个新的线程，然后在这个线程中执行FUNCTION这个函数，当函数执行完成
+  后退出时，这个线程就结束了。 NAME这个字符串参数是可选的，作用是对这个线程进行命名。
+
+* 多线程的异步
+  下面，我们定义一个宏，将函数的执行在异步线程里：
+
+  #+BEGIN_SRC emacs-lisp
+(defmacro define-background-function-wrapper (bg-function fn)
+  (let ((is-loading-sym (intern (concat "*" (symbol-name bg-function) "-is-loading*"))))
+    `(progn
+       (defvar ,is-loading-sym nil)
+       (defun ,bg-function ()
+         (interactive)
+         (when ,is-loading-sym
+           (message ,(concat (symbol-name fn) " is already loading")))
+         (setq ,is-loading-sym t)
+         (make-thread (lambda ()
+                        (unwind-protect
+                            (,fn)
+                          (setq ,is-loading-sym nil))))))))
+  #+END_SRC
+
+  这个宏的作用是将函数 *fn* 运行在异步线程里。下面是一个使用的例子
+
+  #+BEGIN_SRC emacs-lisp
+(defun aborn/log-format (origin)
+  "Format `ORIGIN' log with timestamp."
+  (concat (format-time-string "[%Y-%m-%d %H:%M:%S] " (current-time))
+          origin))
+
+(defun threadaction ()
+  "Emacs multi-thread example runner."
+  (message (aborn/log-format "begin running..."))
+  (sleep-for 1)
+  (message (aborn/log-format "running at point 1"))
+  (sleep-for 5)
+  (message (aborn/log-format "running at point 6"))
+  (sleep-for 10)
+  (message (aborn/log-format "running at point 16"))
+  (sleep-for 15)
+  (message (aborn/log-format "finished bg-runner.")))
+
+(define-background-function-wrapper bg-threadaction threadaction)
+  #+END_SRC
+
+  然后我们执行 *M-x bg-threadaction* 会在*Messages*这个Buffer打印出执行日志!
+  从日志中我们看出，在执行异步线程时，可以同步操作Emacs。
+
+* 如果采用async怎么写
+  上面的例子，如果采用async进行异步操作，写法如下：
+
+  #+BEGIN_SRC emacs-lisp
+(defun async-threadaction ()
+  "Emacs async example runner."
+  (interactive)
+  (async-start
+   ;; 异步执行更新code操作
+   `(lambda ()
+      ,(async-inject-variables "\\`load-path\\'")
+      (require 'aborn-log)
+      (message (aborn/log-format "begin running..."))
+      (sleep-for 1)
+      (message (aborn/log-format "running at point 1"))
+      (sleep-for 5)
+      (message (aborn/log-format "running at point 6"))
+      (sleep-for 10)
+      (message (aborn/log-format "running at point 16"))
+      (sleep-for 15)
+      (message (aborn/log-format "finished bg-runner."))
+      )
+   (lambda (result)
+     (message "finished"))))
+  #+END_SRC
+
+  注意这里添加了这两句:
+  #+BEGIN_SRC emacs-lisp
+  ,(async-inject-variables "\\`load-path\\'")
+  (require 'aborn-log)
+  #+END_SRC
+  目地是将主进程的aborn-log的上下文引入到子进程中去，如果将这两句去掉，就会报这样的错误:
+  *error in process sentinel: async-handle-result: Symbol's function definition is void: aborn/log-format*
+
+* 小结
+  以上对Emacs 26多线程简单描述，我们发现多线程对Emacs带来了一种全新的编辑体验。我们在操作Emacs
+  也不再会受后台任务的影响。这将是Emacs 26最期待的功能。想尝鲜的同学可以下载Daily Build开发版。
+  想要Emacs 26 Release版本的同学，那只能希望Emacs 26早日发布了！
